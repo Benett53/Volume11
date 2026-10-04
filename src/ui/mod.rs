@@ -75,6 +75,10 @@ pub struct VolumeApp {
     visible: bool,
 
     status: Option<(String, Instant)>,
+    /// A problem the audio side recovers from by itself, such as no playback
+    /// device being present. Shown until audio is available again, without
+    /// replacing the mixer the way `fatal` does.
+    notice: Option<String>,
     fatal: Option<String>,
     /// Set by `--show` before the first frame.
     show_requested: bool,
@@ -117,6 +121,7 @@ impl VolumeApp {
             palette,
             visible: false,
             status: None,
+            notice: None,
             fatal: None,
             show_requested: false,
             quitting: false,
@@ -226,6 +231,9 @@ impl VolumeApp {
         while let Ok(event) = self.audio.events.try_recv() {
             match event {
                 Event::Sessions(list) => {
+                    // Sessions only arrive while a device is attached, so any
+                    // "no playback device" notice is out of date now.
+                    self.notice = None;
                     if let Some(master) = list.iter().find(|s| s.kind == SessionKind::Master) {
                         self.device_name = master.label.clone();
                     }
@@ -269,6 +277,7 @@ impl VolumeApp {
                     self.devices = list;
                 }
                 Event::SessionAdded { key, label } => self.apply_on_start(&key, &label),
+                Event::Problem(message) => self.notice = Some(message),
                 Event::Fatal(message) => self.fatal = Some(message),
             }
         }
@@ -360,7 +369,7 @@ impl eframe::App for VolumeApp {
 
     /// Runs even while the window is hidden, which is what lets a tray-only app
     /// react to the icon being clicked without drawing anything in the meantime.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.show_requested {
             self.show_requested = false;
             self.show_window(ctx);
@@ -378,11 +387,17 @@ impl eframe::App for VolumeApp {
         self.drain_audio();
 
         // eframe force-shows the window once, after its first rendered frame.
-        // Re-asserting the hidden state here is what keeps Volume11 in the tray
-        // when Windows starts it. It is a no-op on an already hidden window, and
-        // it runs after `drain_tray`, so a tray click that just asked for the
-        // window is not undone.
-        if !self.visible {
+        // Hiding it again here is what keeps Volume11 in the tray when Windows
+        // starts it. It runs after `drain_tray`, so a tray click that just asked
+        // for the window is not undone.
+        //
+        // The command is sent only while Windows reports the window as shown.
+        // Every viewport command requests a repaint, so sending it on every pass
+        // while hidden made each pass schedule the next one: an idle Volume11
+        // spun through ~0.6 % of a core doing nothing. egui's own visibility
+        // flag only tracks minimised and covered windows, not hidden ones, which
+        // is why Windows is asked directly.
+        if !self.visible && window_is_shown(frame) {
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
 
@@ -428,6 +443,11 @@ impl eframe::App for VolumeApp {
             if let Some(message) = self.fatal.clone() {
                 ui.colored_label(self.palette.danger, message);
                 return;
+            }
+
+            if let Some(message) = &self.notice {
+                ui.label(RichText::new(message).size(13.0).color(self.palette.danger));
+                ui.add_space(4.0);
             }
 
             match self.view {
@@ -1018,6 +1038,27 @@ pub fn window_icon() -> Option<egui::IconData> {
         height: image.height() as u32,
         rgba: image.as_raw().to_vec(),
     })
+}
+
+/// Whether Windows currently shows the application window.
+///
+/// Asked of Windows rather than egui, whose visibility flag describes minimised
+/// and covered windows but not hidden ones.
+fn window_is_shown(frame: &eframe::Frame) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+
+    let Ok(handle) = frame.window_handle() else {
+        return false;
+    };
+
+    match handle.as_raw() {
+        RawWindowHandle::Win32(win32) => unsafe {
+            IsWindowVisible(HWND(win32.hwnd.get() as *mut _)).as_bool()
+        },
+        _ => false,
+    }
 }
 
 /// Size used for the native window.

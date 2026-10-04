@@ -4,7 +4,7 @@
 ; matches an application whose autostart entry and settings are per-user
 ; anyway. Running the setup elevated installs to Program Files instead.
 ;
-; Build:  ISCC.exe /DAppVersion=0.2.0 installer\volume11.iss
+; Build:  ISCC.exe /DAppVersion=0.2.1 installer\volume11.iss
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"

@@ -110,6 +110,10 @@ pub enum Event {
     /// new sessions, so re-applying saved levels cannot clobber adjustments the
     /// user made by hand during this run.
     SessionAdded { key: String, label: String },
+    /// Something went wrong that the application recovers from on its own, such
+    /// as a failed device switch or no playback device being present. Shown to
+    /// the user without replacing the mixer.
+    Problem(String),
     /// The audio thread could not start; the UI shows this instead of silently failing.
     Fatal(String),
 }

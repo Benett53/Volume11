@@ -2,6 +2,25 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.2.1 — 2026-10-04
+
+### Changed
+- New icon.
+- One row per program. All of a program's audio sessions share its level, and
+  a second session that opens later is brought to that level.
+
+### Fixed
+- While hidden, the window kept waking itself, using about 0.6 % of a CPU core
+  doing nothing. Idle use is now zero.
+- A second audio session from the same process was never controlled, and with
+  several processes of one program a slider could move a different session
+  than the one shown.
+- A failed device switch, or briefly having no playback device, replaced the
+  mixer with an error until the program was restarted. It is now a notice that
+  clears once audio is back.
+- Starting with no playback device left the program without audio control
+  until restarted. It now waits for a device to appear.
+
 ## 0.2.0 — 2026-09-24
 
 ### Added

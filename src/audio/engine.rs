@@ -3,10 +3,11 @@
 //! Owns every COM object and the session cache. Nothing here is shared with the UI
 //! except two channels, which keeps all the `!Send` COM pointers on one thread.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, select, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, select, unbounded};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::S_OK;
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioEndpointVolumeCallback};
@@ -84,12 +85,35 @@ where
                 return;
             }
 
-            match Engine::new(thread_events.clone()) {
-                Ok(mut engine) => engine.run(&command_rx, &wake),
-                Err(error) => {
-                    let _ = thread_events.send(Event::Fatal(format!("No audio device: {error}")));
-                    wake();
+            // With no playback device at all, for example a Bluetooth headset
+            // that connects after login, there is nothing to attach to yet.
+            // Giving up here used to leave the application without audio
+            // control until it was restarted, so it waits for one instead.
+            // This is the only polling in the program and only runs while no
+            // device exists.
+            let mut reported = false;
+            let engine = loop {
+                match Engine::new(thread_events.clone()) {
+                    Ok(engine) => break Some(engine),
+                    Err(error) => {
+                        if !reported {
+                            let _ = thread_events
+                                .send(Event::Problem(format!("No playback device: {error}")));
+                            wake();
+                            reported = true;
+                        }
+                        match command_rx.recv_timeout(Duration::from_secs(2)) {
+                            Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                                break None;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
+            };
+
+            if let Some(mut engine) = engine {
+                engine.run(&command_rx, &wake);
             }
 
             unsafe { CoUninitialize() };
@@ -105,6 +129,7 @@ where
 
 /// One cached session. Holding `volume` is what makes slider drags cheap.
 struct Entry {
+    pid: u32,
     key: String,
     label: String,
     kind: SessionKind,
@@ -117,7 +142,17 @@ struct Entry {
 }
 
 impl Entry {
-    fn snapshot(&self, pid: u32) -> Option<SessionSnapshot> {
+    fn level(&self) -> Option<(f32, bool)> {
+        unsafe {
+            Some((
+                self.volume.GetMasterVolume().ok()?,
+                self.volume.GetMute().ok()?.as_bool(),
+            ))
+        }
+    }
+
+    fn snapshot(&self) -> Option<SessionSnapshot> {
+        let pid = self.pid;
         let scalar = unsafe { self.volume.GetMasterVolume().ok()? };
         let muted = unsafe { self.volume.GetMute().ok()?.as_bool() };
 
@@ -157,7 +192,9 @@ struct Engine {
     endpoint_callback: IAudioEndpointVolumeCallback,
     manager: IAudioSessionManager2,
     session_callback: IAudioSessionNotification,
-    sessions: HashMap<u32, Entry>,
+    /// Keyed by session instance identifier, not process id: one process can
+    /// own several sessions, and several processes can belong to one program.
+    sessions: HashMap<String, Entry>,
 }
 
 impl Engine {
@@ -267,7 +304,7 @@ impl Engine {
                 if let Err(error) = set_default_device(&id) {
                     let _ = self
                         .events
-                        .send(Event::Fatal(format!("Could not switch device: {error}")));
+                        .send(Event::Problem(format!("Could not switch device: {error}")));
                     wake();
                 }
             }
@@ -291,18 +328,19 @@ impl Engine {
             return;
         }
 
-        let Some(entry) = self.sessions.values().find(|entry| entry.key == key) else {
-            return;
-        };
-
-        unsafe {
-            if let Some(volume) = volume {
-                let _ = entry
-                    .volume
-                    .SetMasterVolume(percent_to_scalar(volume), &APP_EVENT_CONTEXT);
-            }
-            if let Some(muted) = muted {
-                let _ = entry.volume.SetMute(muted, &APP_EVENT_CONTEXT);
+        // A program's level applies to all of its sessions. Writing only the
+        // first match left the others untouched, and with hash map ordering
+        // "first" was not even the session the row showed.
+        for entry in self.sessions.values().filter(|entry| entry.key == key) {
+            unsafe {
+                if let Some(volume) = volume {
+                    let _ = entry
+                        .volume
+                        .SetMasterVolume(percent_to_scalar(volume), &APP_EVENT_CONTEXT);
+                }
+                if let Some(muted) = muted {
+                    let _ = entry.volume.SetMute(muted, &APP_EVENT_CONTEXT);
+                }
             }
         }
     }
@@ -321,14 +359,13 @@ impl Engine {
                 }
                 wake();
             }
-            Notification::SessionStateChanged { pid, expired } => {
-                if expired {
-                    self.sessions.remove(&pid);
+            Notification::SessionStateChanged { session, expired } => {
+                if expired && self.sessions.remove(&session).is_some() {
                     self.publish_sessions(wake);
                 }
             }
             Notification::SessionVolume {
-                pid,
+                session,
                 scalar,
                 muted,
                 context,
@@ -336,7 +373,7 @@ impl Engine {
                 if context == APP_EVENT_CONTEXT {
                     return; // our own write coming back
                 }
-                if let Some(entry) = self.sessions.get(&pid) {
+                if let Some(entry) = self.sessions.get(&session) {
                     let _ = self.events.send(Event::Changed {
                         key: entry.key.clone(),
                         volume: scalar_to_percent(scalar),
@@ -383,7 +420,7 @@ impl Engine {
             Err(error) => {
                 let _ = self
                     .events
-                    .send(Event::Fatal(format!("No playback device: {error}")));
+                    .send(Event::Problem(format!("No playback device: {error}")));
                 wake();
                 return;
             }
@@ -407,7 +444,7 @@ impl Engine {
             Err(error) => {
                 let _ = self
                     .events
-                    .send(Event::Fatal(format!("Device change failed: {error}")));
+                    .send(Event::Problem(format!("Device change failed: {error}")));
                 wake();
             }
         }
@@ -451,9 +488,17 @@ impl Engine {
 
     /// Full re-enumeration. Only runs on structural changes, never while dragging.
     ///
-    /// Returns the `(key, label)` of every session that was not already cached.
+    /// Returns the `(key, label)` of every program that was not playing before.
+    /// A new session of a program that already had one is brought to that
+    /// program's current level instead, so opening a second stream does not
+    /// reset a level the user has just adjusted.
     fn rebuild_sessions(&mut self) -> Vec<(String, String)> {
-        let mut added = Vec::new();
+        let mut added: Vec<(String, String)> = Vec::new();
+        let known_keys: HashSet<String> = self
+            .sessions
+            .values()
+            .map(|entry| entry.key.clone())
+            .collect();
 
         let Ok(enumerator) = (unsafe { self.manager.GetSessionEnumerator() }) else {
             return added;
@@ -462,7 +507,7 @@ impl Engine {
             return added;
         };
 
-        let mut seen: Vec<u32> = Vec::with_capacity(count as usize);
+        let mut seen: HashSet<String> = HashSet::with_capacity(count as usize);
 
         for index in 0..count {
             let Ok(control) = (unsafe { enumerator.GetSession(index) }) else {
@@ -493,9 +538,16 @@ impl Engine {
                 continue;
             }
 
-            seen.push(pid);
+            let Some(instance) = (unsafe { control2.GetSessionInstanceIdentifier() })
+                .ok()
+                .and_then(take_pwstr)
+            else {
+                continue;
+            };
 
-            if self.sessions.contains_key(&pid) {
+            seen.insert(instance.clone());
+
+            if self.sessions.contains_key(&instance) {
                 continue;
             }
 
@@ -538,17 +590,34 @@ impl Engine {
                 SessionKind::App
             };
 
-            if kind == SessionKind::App {
+            if known_keys.contains(&key) {
+                // Another session of a program that is already playing: match
+                // the level its existing sessions have.
+                let level = self
+                    .sessions
+                    .values()
+                    .filter(|entry| entry.key == key)
+                    .min_by_key(|entry| entry.pid)
+                    .and_then(Entry::level);
+
+                if let Some((scalar, muted)) = level {
+                    unsafe {
+                        let _ = volume.SetMasterVolume(scalar, &APP_EVENT_CONTEXT);
+                        let _ = volume.SetMute(muted, &APP_EVENT_CONTEXT);
+                    }
+                }
+            } else if kind == SessionKind::App && !added.iter().any(|(k, _)| *k == key) {
                 added.push((key.clone(), label.clone()));
             }
 
             let session_events: IAudioSessionEvents =
-                SessionEvents::new(self.notify_tx.clone(), pid).into();
+                SessionEvents::new(self.notify_tx.clone(), instance.clone()).into();
             let registered = unsafe { control.RegisterAudioSessionNotification(&session_events) };
 
             self.sessions.insert(
-                pid,
+                instance,
                 Entry {
+                    pid,
                     key,
                     label,
                     kind,
@@ -560,7 +629,7 @@ impl Engine {
             );
         }
 
-        self.sessions.retain(|pid, _| seen.contains(pid));
+        self.sessions.retain(|instance, _| seen.contains(instance));
 
         added
     }
@@ -583,11 +652,22 @@ impl Engine {
             executable: None,
         });
 
-        for (pid, entry) in &self.sessions {
-            if let Some(snapshot) = entry.snapshot(*pid) {
-                snapshots.push(snapshot);
-            }
+        // One row per program. Its sessions share a level (see
+        // `rebuild_sessions` and `write_volume`), so the row shows the session
+        // with the lowest process id, which keeps the choice stable.
+        let mut programs: BTreeMap<&str, &Entry> = BTreeMap::new();
+        for entry in self.sessions.values() {
+            programs
+                .entry(entry.key.as_str())
+                .and_modify(|shown| {
+                    if entry.pid < shown.pid {
+                        *shown = entry;
+                    }
+                })
+                .or_insert(entry);
         }
+
+        snapshots.extend(programs.values().filter_map(|entry| entry.snapshot()));
 
         snapshots.sort_by(|a, b| {
             a.kind

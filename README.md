@@ -15,6 +15,7 @@ program starts playing.
 ## Features
 
 - Levels stored per executable, kept across restarts and updates
+- One row per program, covering all of its audio sessions
 - Applied automatically when a program starts playing
 - Switch the output device from the window; each device keeps its own levels
 - Follows the default output device when it is changed elsewhere
@@ -128,13 +129,13 @@ time are Windows' own graphics and shell components (`d3d12.dll`, `dxgi.dll`,
 cargo build --release
 cargo test
 cargo run --example smoke        # prints live devices and audio sessions
-python tools/make-icon.py        # regenerates assets/icon.ico
+python tools/make-icon.py        # builds assets/icon.ico from assets/logo-source.png
 ```
 
 The installer needs [Inno Setup](https://jrsoftware.org/isinfo.php):
 
 ```bash
-ISCC.exe /DAppVersion=0.2.0 installer/volume11.iss
+ISCC.exe /DAppVersion=0.2.1 installer/volume11.iss
 ```
 
 Releases are built with MSVC; the GNU toolchain works too.

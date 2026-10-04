@@ -40,6 +40,7 @@ fn main() {
                 }
             }
             Ok(audio::Event::SessionAdded { key, .. }) => println!("  ~ new session: {key}"),
+            Ok(audio::Event::Problem(msg)) => println!("  ! {msg}"),
             Ok(audio::Event::Fatal(msg)) => {
                 println!("FATAL: {msg}");
                 return;

@@ -1,80 +1,108 @@
-"""Generate the Volume11 icon.
+"""Build the Volume11 icon from the logo artwork.
 
-A level meter: four ascending rounded bars on a dark rounded tile, the tallest
-picked out in the application's accent grey. Chosen because bars stay legible at
-16 px in the notification area, where a speaker cone or a slider turns to mush.
+    python tools/make-icon.py              # icon from assets/logo-source.png
+    python tools/make-icon.py artwork.png  # re-import artwork first
 
-Drawn at 16x the target size and downsampled, which is cheaper than writing an
-anti-aliased rasteriser and gives cleaner edges than drawing small directly.
+Importing artwork removes its dark matte: the logo is drawn on a near-black
+square, which as an icon would sit in the taskbar as a dark tile. Every pixel
+is treated as the logo composited over that background colour, and the
+compositing is undone, so the glow survives as real transparency instead of a
+dark halo. The result is cropped to the artwork and stored as the source.
+
+Frames are written as classic 32bpp DIBs. PIL stores icon frames
+PNG-compressed, which Windows only decodes reliably at 256x256; at tray sizes
+they render as a monochrome blob.
+
+Requires Pillow.
 """
 import struct
-from PIL import Image, ImageDraw
+import sys
+from pathlib import Path
 
-SS = 16          # supersampling factor
-BASE = 64        # design grid
+from PIL import Image
 
-TILE = (0x15, 0x17, 0x1B, 255)      # near-black tile
-EDGE = (0x2E, 0x33, 0x3A, 255)      # subtle rim so it reads on black backgrounds
-BAR = (0xE8, 0xEA, 0xEE, 255)       # near-white bars
-ACCENT = (0x9A, 0xA3, 0xAD, 255)    # the application's grey accent
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / "assets" / "logo-source.png"
+ICON = ROOT / "assets" / "icon.ico"
+LOGO = ROOT / "docs" / "logo.png"
 
-# x position, height, in design-grid units. Ascending, last one accented.
-# The group is centred in the tile interior (2..62): four 7-wide bars on an
-# 11-unit pitch span 40 units, and the tallest is 34, so the baseline sits at
-# 32 + 34/2 to leave equal air above and below.
-BARS = [(12, 13), (23, 20), (34, 27), (45, 34)]
-BAR_W = 7
+SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
+
+# Brightness above the matte below which a pixel is treated as background.
+NOISE_FLOOR = 0.07
+
+# At tray sizes the soft glow only blurs the outline. Up to this edge length the
+# faint end of the alpha range is cut so the shapes stay crisp.
+CRISP_UP_TO = 32
 
 
-def render(size: int) -> Image.Image:
-    big = size * SS
-    scale = big / BASE
-    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
+def background_colour(image: Image.Image) -> tuple:
+    """Median of the four corner regions, which in the artwork are plain matte."""
+    rgb = image.convert("RGB")
+    w, h = rgb.size
+    patch = max(4, min(w, h) // 40)
+    samples = []
+    for x0, y0 in ((0, 0), (w - patch, 0), (0, h - patch), (w - patch, h - patch)):
+        for y in range(y0, y0 + patch):
+            for x in range(x0, x0 + patch):
+                samples.append(rgb.getpixel((x, y)))
+    return tuple(sorted(c[i] for c in samples)[len(samples) // 2] for i in range(3))
 
-    inset = 2 * scale
-    radius = 13 * scale
-    draw.rounded_rectangle(
-        [inset, inset, big - inset, big - inset],
-        radius=radius,
-        fill=TILE,
-        outline=EDGE,
-        width=max(1, int(1.2 * scale)),
-    )
 
-    baseline = 49 * scale
-    for index, (x, height) in enumerate(BARS):
-        left = x * scale
-        right = (x + BAR_W) * scale
-        top = baseline - height * scale
-        colour = ACCENT if index == len(BARS) - 1 else BAR
-        draw.rounded_rectangle(
-            [left, top, right, baseline],
-            radius=(BAR_W * scale) / 2,
-            fill=colour,
-        )
+def remove_matte(image: Image.Image) -> Image.Image:
+    """Undo `pixel = alpha * colour + (1 - alpha) * background`."""
+    bg = background_colour(image)
+    rgb = image.convert("RGB")
+    out = Image.new("RGBA", rgb.size)
+    src = rgb.load()
+    dst = out.load()
 
-    return image.resize((size, size), Image.LANCZOS)
+    for y in range(rgb.size[1]):
+        for x in range(rgb.size[0]):
+            p = src[x, y]
+            # The artwork only adds light to the background, so only channels
+            # brighter than it count. Darker pixels are texture and compression
+            # noise in the matte; counting them left grey grain around the logo
+            # on light backgrounds.
+            alpha = 0.0
+            for c, b in zip(p, bg):
+                if c > b:
+                    alpha = max(alpha, (c - b) / (255 - b))
+            if alpha <= NOISE_FLOOR:
+                dst[x, y] = (0, 0, 0, 0)
+                continue
+            # Colour is recovered with the true alpha; the stored alpha is
+            # ramped from the noise floor so faint matte noise fades to nothing.
+            colour = tuple(
+                max(0, min(255, round((c - (1 - alpha) * b) / alpha))) for c, b in zip(p, bg)
+            )
+            shown = (alpha - NOISE_FLOOR) / (1 - NOISE_FLOOR)
+            dst[x, y] = (*colour, round(shown * 255))
+    return out
+
+
+def crop_square(image: Image.Image, margin: float = 0.04) -> Image.Image:
+    """Crop to the visible artwork, padded to a centred square."""
+    alpha = image.getchannel("A").point(lambda a: 255 if a > 24 else 0)
+    box = alpha.getbbox()
+    if box:
+        image = image.crop(box)
+    side = round(max(image.size) * (1 + 2 * margin))
+    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    canvas.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
+    return canvas
 
 
 def dib_frame(image: Image.Image) -> bytes:
-    """32bpp BGRA bottom-up plus a 1bpp AND mask.
-
-    Windows only decodes PNG-compressed icon frames reliably at 256x256; at tray
-    sizes they come out as a monochrome blob, so every frame is a classic DIB.
-    """
+    """32bpp BGRA bottom-up, followed by a 1bpp AND mask."""
     width, height = image.size
-    pixels = image.load()
-
-    header = struct.pack(
-        "<IiiHHIIiiII",
-        40, width, height * 2, 1, 32, 0, 0, 0, 0, 0, 0,
-    )
+    px = image.load()
+    header = struct.pack("<IiiHHIIiiII", 40, width, height * 2, 1, 32, 0, 0, 0, 0, 0, 0)
 
     xor = bytearray()
     for y in range(height - 1, -1, -1):
         for x in range(width):
-            r, g, b, a = pixels[x, y]
+            r, g, b, a = px[x, y]
             xor += bytes((b, g, r, a))
 
     row_bytes = ((width + 31) // 32) * 4
@@ -82,30 +110,58 @@ def dib_frame(image: Image.Image) -> bytes:
     for y in range(height - 1, -1, -1):
         row = bytearray(row_bytes)
         for x in range(width):
-            if pixels[x, y][3] == 0:
+            if px[x, y][3] == 0:
                 row[x // 8] |= 0x80 >> (x % 8)
         mask += row
 
     return header + bytes(xor) + bytes(mask)
 
 
-SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256]
-frames = [(s, dib_frame(render(s))) for s in SIZES]
+def resize(image: Image.Image, size: int) -> Image.Image:
+    # Resampling premultiplied colour avoids dark fringes along soft edges.
+    premultiplied = image.convert("RGBa")
+    return premultiplied.resize((size, size), Image.LANCZOS).convert("RGBA")
 
-out = bytearray(struct.pack("<HHH", 0, 1, len(frames)))
-offset = 6 + 16 * len(frames)
-for size, data in frames:
-    out += struct.pack(
-        "<BBBBHHII",
-        0 if size >= 256 else size, 0 if size >= 256 else size,
-        0, 0, 1, 32, len(data), offset,
-    )
-    offset += len(data)
-for _, data in frames:
-    out += data
 
-open("assets/icon.ico", "wb").write(bytes(out))
-print("wrote assets/icon.ico", len(out), "bytes")
+def crisp(image: Image.Image) -> Image.Image:
+    """Drop the faint glow and steepen the edge, for very small frames."""
+    r, g, b, a = image.split()
+    a = a.point(lambda v: max(0, min(255, round((v - 70) * 255 / 160))))
+    return Image.merge("RGBA", (r, g, b, a))
 
-render(256).save("docs/logo.png")
-print("wrote docs/logo.png")
+
+def frame(source: Image.Image, size: int) -> Image.Image:
+    image = resize(source, size)
+    return crisp(image) if size <= CRISP_UP_TO else image
+
+
+def write_icon(source: Image.Image) -> None:
+    frames = [(s, dib_frame(frame(source, s))) for s in SIZES]
+    out = bytearray(struct.pack("<HHH", 0, 1, len(frames)))
+    offset = 6 + 16 * len(frames)
+    for size, data in frames:
+        edge = 0 if size >= 256 else size
+        out += struct.pack("<BBBBHHII", edge, edge, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+    for _, data in frames:
+        out += data
+    ICON.write_bytes(bytes(out))
+
+
+def main() -> None:
+    if len(sys.argv) > 1:
+        artwork = Image.open(sys.argv[1])
+        source = crop_square(remove_matte(artwork))
+        if source.width > 1024:
+            source = resize(source, 1024)
+        source.save(SOURCE, optimize=True)
+        print(f"imported {sys.argv[1]} -> {SOURCE.name} ({source.width}px)")
+
+    source = Image.open(SOURCE).convert("RGBA")
+    write_icon(source)
+    resize(source, 256).save(LOGO, optimize=True)
+    print(f"wrote {ICON.relative_to(ROOT)} ({len(SIZES)} frames) and {LOGO.relative_to(ROOT)}")
+
+
+if __name__ == "__main__":
+    main()

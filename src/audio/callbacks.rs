@@ -24,10 +24,10 @@ pub enum Notification {
     /// A new audio session was created. The engine re-enumerates to pick it up.
     SessionCreated,
     /// A session changed state (active / inactive / expired).
-    SessionStateChanged { pid: u32, expired: bool },
+    SessionStateChanged { session: String, expired: bool },
     /// Volume or mute changed for a session, triggered from outside this app.
     SessionVolume {
-        pid: u32,
+        session: String,
         scalar: f32,
         muted: bool,
         /// Event context, so the engine can ignore echoes of its own writes.
@@ -71,12 +71,14 @@ impl IAudioSessionNotification_Impl for SessionNotification_Impl {
 #[implement(IAudioSessionEvents)]
 pub struct SessionEvents {
     tx: Sender<Notification>,
-    pid: u32,
+    /// Session instance identifier. A process can own several sessions, so the
+    /// process id is not enough to tell them apart.
+    session: String,
 }
 
 impl SessionEvents {
-    pub fn new(tx: Sender<Notification>, pid: u32) -> Self {
-        Self { tx, pid }
+    pub fn new(tx: Sender<Notification>, session: String) -> Self {
+        Self { tx, session }
     }
 }
 
@@ -95,7 +97,7 @@ impl IAudioSessionEvents_Impl for SessionEvents_Impl {
         };
 
         let _ = self.tx.send(Notification::SessionVolume {
-            pid: self.pid,
+            session: self.session.clone(),
             scalar: new_volume,
             muted: new_mute.as_bool(),
             context,
@@ -107,7 +109,7 @@ impl IAudioSessionEvents_Impl for SessionEvents_Impl {
     fn OnStateChanged(&self, new_state: AudioSessionState) -> Result<()> {
         // AudioSessionStateExpired == 2: the process released the stream for good.
         let _ = self.tx.send(Notification::SessionStateChanged {
-            pid: self.pid,
+            session: self.session.clone(),
             expired: new_state.0 == 2,
         });
         Ok(())
@@ -115,7 +117,7 @@ impl IAudioSessionEvents_Impl for SessionEvents_Impl {
 
     fn OnSessionDisconnected(&self, _reason: AudioSessionDisconnectReason) -> Result<()> {
         let _ = self.tx.send(Notification::SessionStateChanged {
-            pid: self.pid,
+            session: self.session.clone(),
             expired: true,
         });
         Ok(())
