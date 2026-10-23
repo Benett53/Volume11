@@ -29,7 +29,7 @@ program starts playing.
 ## Install
 
 Download `Volume11-Setup.exe` from the
-[latest release](https://github.com/baba537/Volume11/releases/latest) and run it.
+[latest release](https://github.com/Benett53/Volume11/releases/latest) and run it.
 
 Installs per user under `%LOCALAPPDATA%\Programs\Volume11`, no administrator
 rights. Running the setup elevated installs to Program Files instead. A new
