@@ -43,6 +43,8 @@ The build is not code-signed, so SmartScreen warns once.
 
 ## Using it
 
+![Changing a program's level](docs/demo.gif)
+
 | Action | How |
 |---|---|
 | Open or close | Left-click the tray icon |
