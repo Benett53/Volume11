@@ -56,6 +56,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Start {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Parameters: "--updated"; Flags: nowait runasoriginaluser; Check: RestartAfterUpdate
 
 [UninstallDelete]
 ; The application writes no files next to its executable, but an upgrade from a
@@ -85,6 +86,13 @@ begin
     { Give it a moment to save and release the file. }
     Sleep(1200);
   end;
+end;
+
+{ Volume11 passes /restartapp=1 when it installs an update of itself, so it
+  comes back after the silent install instead of staying closed. }
+function RestartAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent() and (ExpandConstant('{param:restartapp|0}') = '1');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

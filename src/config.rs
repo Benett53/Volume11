@@ -48,6 +48,10 @@ pub struct Settings {
     pub accent: String,
     /// Pure black background for OLED panels.
     pub oled_black: bool,
+    /// Ask GitHub for a newer release at most once a day.
+    pub check_updates: bool,
+    /// Unix time of the last successful update check.
+    pub last_update_check: u64,
 }
 
 impl Default for Settings {
@@ -60,6 +64,8 @@ impl Default for Settings {
             start_with_windows: false,
             accent: "#9AA3AD".to_string(),
             oled_black: true,
+            check_updates: true,
+            last_update_check: 0,
         }
     }
 }

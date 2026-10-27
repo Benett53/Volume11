@@ -2,6 +2,16 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.3.0 — 2026-10-27
+
+### Added
+- Updates from the settings: current version, "Check for updates" and
+  "Download and install". A small dot on the settings button shows when a new
+  version is out; there are no pop-ups.
+- Automatic check at most once a day, switchable in the settings.
+- Releases carry `SHA256SUMS` and a minisign signature. The updater installs a
+  file only if both checks pass.
+
 ## 0.2.1 — 2026-10-04
 
 ### Changed

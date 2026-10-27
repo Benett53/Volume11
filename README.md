@@ -25,6 +25,7 @@ program starts playing.
 - Autostart, switchable from Task Manager
 - Closing the window keeps it running in the tray
 - One instance at a time
+- Updates from the settings, with a small dot on the settings button when one is out
 
 ## Install
 
@@ -107,23 +108,17 @@ deleted, the next start repoints it.
 
 Written atomically. An unreadable file is moved to `config.json.broken`.
 
-## Offline
+## Network
 
-Volume11 makes no network connections: no networking dependency, no network
-code, and the binary imports no networking library. To check:
+The only network access is the update check, which asks GitHub for the latest
+release: when "Check for updates" is pressed, and at most once a day while
+"Check automatically once a day" is on (Settings → Updates). Nothing else is
+sent or received.
 
-```bash
-cargo tree | grep -iE "reqwest|hyper|ureq|curl|tokio|rustls|openssl"   # no matches
-```
-
-```powershell
-dumpbin /dependents Volume11.exe    # no ws2_32, winhttp, wininet or urlmon
-```
-
-The `https://` strings in the binary are panic and documentation text from egui
-and wgpu; there is no HTTP client to fetch them. The libraries loaded at run
-time are Windows' own graphics and shell components (`d3d12.dll`, `dxgi.dll`,
-`d3dcompiler_47.dll`, `shcore.dll`).
+An update is installed only if `SHA256SUMS` carries a valid minisign signature
+from the key built into Volume11 and the downloaded file matches its checksum.
+The installed copy runs the new setup silently and starts again; a portable
+`Volume11.exe` replaces itself.
 
 ## Building
 

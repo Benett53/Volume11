@@ -20,6 +20,7 @@ use crate::audio::{
 use crate::autostart;
 use crate::config::{Config, UnknownAppPolicy};
 use crate::tray::TrayMessage;
+use crate::update::{self, Status, Updater};
 use appicon::IconCache;
 use icons::Icon;
 use theme::{ACCENT_CHOICES, CONTENT_MARGIN, Palette, accent_to_hex, parse_accent};
@@ -91,6 +92,8 @@ pub struct VolumeApp {
     icons: IconCache,
     /// Session key and raw text of the percentage field being typed into.
     editing: Option<(String, String)>,
+
+    updater: Updater,
 }
 
 impl VolumeApp {
@@ -98,6 +101,7 @@ impl VolumeApp {
         cc: &eframe::CreationContext<'_>,
         audio: AudioHandle,
         tray: crossbeam_channel::Receiver<TrayMessage>,
+        updater: Updater,
         config: Config,
         config_path: PathBuf,
     ) -> Self {
@@ -127,6 +131,7 @@ impl VolumeApp {
             quitting: false,
             icons: IconCache::default(),
             editing: None,
+            updater,
         }
     }
 
@@ -354,6 +359,20 @@ impl VolumeApp {
         self.set_status(format!("{count} applied"));
     }
 
+    /// Keeps the stored check time current and quits once an update has taken over.
+    fn follow_updater(&mut self, ctx: &egui::Context) {
+        let last = self.updater.last_check();
+        if last != self.config.settings.last_update_check {
+            self.config.settings.last_update_check = last;
+            self.persist_settings();
+        }
+        if self.updater.wants_exit() && !self.quitting {
+            let _ = self.config.save(&self.config_path);
+            self.quitting = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+    }
+
     fn persist_settings(&mut self) {
         if let Err(error) = self.config.save(&self.config_path) {
             self.set_status(format!("Error: {error}"));
@@ -385,6 +404,7 @@ impl eframe::App for VolumeApp {
 
         self.drain_tray(ctx);
         self.drain_audio();
+        self.follow_updater(ctx);
 
         // eframe force-shows the window once, after its first rendered frame.
         // Hiding it again here is what keeps Volume11 in the tray when Windows
@@ -487,9 +507,25 @@ impl VolumeApp {
                 }
 
                 let settings_open = self.view == View::Settings;
-                if icon_button(ui, Icon::Settings, "Settings", settings_open, &self.palette)
-                    .clicked()
-                {
+                let update_ready = self.updater.available().is_some();
+                let tooltip = if update_ready {
+                    "Settings - update available"
+                } else {
+                    "Settings"
+                };
+                let settings_button =
+                    icon_button(ui, Icon::Settings, tooltip, settings_open, &self.palette);
+                // A small dot instead of a pop-up: visible when the window is
+                // opened anyway, never in the way.
+                if update_ready {
+                    let rect = settings_button.rect;
+                    ui.painter().circle_filled(
+                        egui::pos2(rect.right() - 4.0, rect.top() + 4.0),
+                        3.0,
+                        self.palette.accent,
+                    );
+                }
+                if settings_button.clicked() {
                     self.view = if settings_open {
                         View::Mixer
                     } else {
@@ -925,6 +961,10 @@ impl VolumeApp {
                     }
                 }
 
+                ui.add_space(8.0);
+                self.section(ui, "Updates");
+                changed |= self.updates(ui, ctx);
+
                 ui.add_space(10.0);
 
                 // Saved levels belong to a device, so the list shows the current
@@ -1013,6 +1053,81 @@ impl VolumeApp {
                     self.persist_settings();
                 }
             });
+    }
+
+    /// Version, update state and the button that acts on it. Returns whether a
+    /// setting changed.
+    fn updates(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
+        let dim = self.palette.text_dim;
+        let status = self.updater.status();
+
+        let line = match &status {
+            Status::Idle => String::new(),
+            Status::Checking => "Checking...".to_string(),
+            Status::UpToDate => "Up to date".to_string(),
+            Status::Available(release) => format!("Version {} is available", release.version),
+            Status::Downloading(received, Some(total)) if *total > 0 => {
+                format!("Downloading... {} %", received * 100 / total)
+            }
+            Status::Downloading(..) => "Downloading...".to_string(),
+            Status::Installing => "Installing, Volume11 restarts...".to_string(),
+            Status::Failed(error) => error.clone(),
+        };
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("Version {}", update::CURRENT_VERSION))
+                    .size(14.0)
+                    .color(self.palette.text),
+            );
+            if !line.is_empty() {
+                let colour = match status {
+                    Status::Available(_) => self.palette.accent,
+                    Status::Failed(_) => self.palette.danger,
+                    _ => dim,
+                };
+                ui.add(egui::Label::new(RichText::new(line).size(13.0).color(colour)).truncate());
+            }
+        });
+
+        ui.add_space(4.0);
+        let busy = matches!(
+            status,
+            Status::Checking | Status::Downloading(..) | Status::Installing
+        );
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        ui.add_enabled_ui(!busy, |ui| match &status {
+            Status::Available(release) => {
+                let label = format!("Download and install {}", release.version);
+                if chip_button(ui, &label, true, &self.palette).clicked() {
+                    self.updater.install(release.clone(), wake);
+                }
+            }
+            _ => {
+                if chip_button(ui, "Check for updates", false, &self.palette).clicked() {
+                    self.updater.check(wake);
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        let changed = ui
+            .checkbox(
+                &mut self.config.settings.check_updates,
+                RichText::new("Check automatically once a day").size(14.0),
+            )
+            .changed();
+        if changed {
+            self.updater
+                .set_automatic(self.config.settings.check_updates);
+        }
+        if busy {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        changed
     }
 
     fn section(&self, ui: &mut egui::Ui, title: impl Into<String>) {

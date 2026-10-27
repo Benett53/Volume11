@@ -9,3 +9,4 @@ pub mod config;
 pub mod instance;
 pub mod tray;
 pub mod ui;
+pub mod update;

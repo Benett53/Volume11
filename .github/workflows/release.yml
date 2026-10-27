@@ -67,11 +67,43 @@ jobs:
           $rest | Set-Content notes.md -Encoding utf8
           Get-Content notes.md
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            dist/Volume11-Setup.exe
+            dist/Volume11.exe
+            notes.md
+
+  # Checksums and their signature are what the in-app updater trusts, so they
+  # are made in one place from exactly the files that get published.
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+
+      - name: Checksums and signature
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          mv dist/* .
+          sha256sum Volume11-Setup.exe Volume11.exe > SHA256SUMS
+          cat SHA256SUMS
+          echo "$MINISIGN_SECRET_KEY" > minisign.key
+          minisign -S -s minisign.key -m SHA256SUMS -x SHA256SUMS.minisig -t "Volume11 ${{ github.ref_name }}"
+          rm minisign.key
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/Volume11-Setup.exe
-            dist/Volume11.exe
+            Volume11-Setup.exe
+            Volume11.exe
+            SHA256SUMS
+            SHA256SUMS.minisig
           body_path: notes.md
           draft: false

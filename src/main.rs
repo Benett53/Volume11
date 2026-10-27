@@ -8,7 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use volume11::config::Config;
-use volume11::{audio, autostart, config, instance, tray, ui};
+use volume11::{audio, autostart, config, instance, tray, ui, update};
 
 /// Renderer configuration, tuned for starting reliably rather than for raw speed.
 ///
@@ -49,9 +49,21 @@ fn main() -> eframe::Result<()> {
     // Useful for a desktop shortcut, and it is how the window gets tested.
     let show_on_start = std::env::args().any(|argument| argument == "--show");
 
+    // Started by an update: the previous copy is still shutting down and holds
+    // the single-instance slot for a moment longer.
+    let updated = std::env::args().any(|argument| argument == "--updated");
+
     // Only one copy may run: two would both sit in the tray and both write the
     // configuration file. A second start hands over to the first and stops.
-    let Some(_instance) = instance::acquire() else {
+    let mut instance = instance::acquire();
+    for _ in 0..50 {
+        if instance.is_some() || !updated {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        instance = instance::acquire();
+    }
+    let Some(_instance) = instance else {
         instance::signal_existing();
         return Ok(());
     };
@@ -107,9 +119,16 @@ fn main() -> eframe::Result<()> {
             let audio = audio::spawn(move || ctx_for_audio.request_repaint());
             let tray = tray::spawn(move || ctx_for_tray.request_repaint());
 
-            let mut app = ui::VolumeApp::new(cc, audio, tray, loaded, config_path);
+            let ctx_for_update = cc.egui_ctx.clone();
+            let updater = update::Updater::new(
+                loaded.settings.check_updates,
+                loaded.settings.last_update_check,
+                move || ctx_for_update.request_repaint(),
+            );
 
-            if show_on_start {
+            let mut app = ui::VolumeApp::new(cc, audio, tray, updater, loaded, config_path);
+
+            if show_on_start || updated {
                 app.request_show();
             }
 
