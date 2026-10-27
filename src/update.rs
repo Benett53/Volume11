@@ -448,9 +448,22 @@ fn replace_executable(new: &Path) -> Result<()> {
         .map_err(|e| e.to_string())
 }
 
+/// Removes what an earlier update left behind: the renamed executable of a
+/// portable copy and the downloaded files in the temp folder.
 fn cleanup_old_executable() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::fs::remove_file(exe.with_extension("exe.old"));
+    }
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("volume11-update-")
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
     }
 }
 
