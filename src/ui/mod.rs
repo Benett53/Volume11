@@ -3,8 +3,10 @@
 //! Runs in egui's reactive mode: frames are only produced in response to input or
 //! to a wake-up from the audio or tray thread. An idle Volume11 draws nothing.
 
+#[cfg_attr(target_os = "linux", path = "appicon_linux.rs")]
 mod appicon;
 mod icons;
+#[cfg_attr(target_os = "linux", path = "placement_linux.rs")]
 mod placement;
 mod theme;
 mod widgets;
@@ -39,6 +41,12 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 const ICON_SIZE: f32 = 21.0;
 /// Width of the editable percentage box.
 const NUMBER_FIELD_WIDTH: f32 = 60.0;
+/// Settings label for the autostart switch.
+#[cfg(windows)]
+const AUTOSTART_LABEL: &str = "Start with Windows";
+#[cfg(not(windows))]
+const AUTOSTART_LABEL: &str = "Start at login";
+
 /// Identity for the settings panel's percentage box; no session uses this key.
 const DEFAULT_VOLUME_KEY: &str = "@default";
 
@@ -946,7 +954,7 @@ impl VolumeApp {
                 if ui
                     .checkbox(
                         &mut autostart_enabled,
-                        RichText::new("Start with Windows").size(14.0),
+                        RichText::new(AUTOSTART_LABEL).size(14.0),
                     )
                     .changed()
                 {
@@ -1159,6 +1167,7 @@ pub fn window_icon() -> Option<egui::IconData> {
 ///
 /// Asked of Windows rather than egui, whose visibility flag describes minimised
 /// and covered windows but not hidden ones.
+#[cfg(windows)]
 fn window_is_shown(frame: &eframe::Frame) -> bool {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
@@ -1172,6 +1181,22 @@ fn window_is_shown(frame: &eframe::Frame) -> bool {
         RawWindowHandle::Win32(win32) => unsafe {
             IsWindowVisible(HWND(win32.hwnd.get() as *mut _)).as_bool()
         },
+        _ => false,
+    }
+}
+
+/// Whether the X server currently maps the application window.
+#[cfg(target_os = "linux")]
+fn window_is_shown(frame: &eframe::Frame) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = frame.window_handle() else {
+        return false;
+    };
+
+    match handle.as_raw() {
+        RawWindowHandle::Xlib(xlib) => placement::is_mapped(xlib.window as u32),
+        RawWindowHandle::Xcb(xcb) => placement::is_mapped(xcb.window.get()),
         _ => false,
     }
 }

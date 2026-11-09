@@ -376,6 +376,7 @@ struct Plan {
 
 enum Method {
     /// Run the setup silently; it closes this instance and starts the new one.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Installer { all_users: bool },
     /// Portable copy: swap the executable in place.
     ReplaceExecutable,
@@ -385,6 +386,20 @@ fn current_exe() -> Result<PathBuf> {
     std::env::current_exe().map_err(|e| e.to_string())
 }
 
+/// Release asset with the bare Linux executable, used for updates. The
+/// tarball next to it is for first installs.
+#[cfg(not(windows))]
+pub const LINUX_ASSET: &str = "volume11-linux-x86_64";
+
+#[cfg(not(windows))]
+fn plan() -> Result<Plan> {
+    Ok(Plan {
+        asset: LINUX_ASSET,
+        method: Method::ReplaceExecutable,
+    })
+}
+
+#[cfg(windows)]
 fn plan() -> Result<Plan> {
     let exe = current_exe()?;
     let dir = exe.parent().ok_or("no program folder")?;
@@ -407,6 +422,12 @@ fn plan() -> Result<Plan> {
     }
 }
 
+#[cfg(not(windows))]
+fn run_installer(_setup: &Path, _all_users: bool) -> Result<()> {
+    Err("no installer on this platform".into())
+}
+
+#[cfg(windows)]
 fn run_installer(setup: &Path, all_users: bool) -> Result<()> {
     // For a Program Files installation the setup asks for administrator rights
     // itself, which also lets it start Volume11 again without them.
@@ -430,8 +451,45 @@ fn run_installer(setup: &Path, all_users: bool) -> Result<()> {
 
 /// Swap the running executable for `new` and start the new one.
 ///
+/// Linux allows replacing a running executable by renaming over it: the
+/// process keeps the old file open. The new file is first copied next to the
+/// old one, so the rename stays on one file system. Without write access to
+/// the folder (a system-wide install) `pkexec` asks for the password.
+#[cfg(not(windows))]
+fn replace_executable(new: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let exe = current_exe()?;
+    let staged = exe.with_file_name(".volume11.new");
+    let local = std::fs::copy(new, &staged)
+        .and_then(|_| std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)))
+        .and_then(|_| std::fs::rename(&staged, &exe));
+
+    if local.is_err() {
+        let _ = std::fs::remove_file(&staged);
+        let status = std::process::Command::new("pkexec")
+            .arg("install")
+            .arg("-m")
+            .arg("755")
+            .arg(new)
+            .arg(&exe)
+            .status()
+            .map_err(|e| format!("pkexec: {e}"))?;
+        if !status.success() {
+            return Err("installation was not authorised".into());
+        }
+    }
+
+    std::process::Command::new(&exe)
+        .args(["--updated", "--show"])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Windows does not allow overwriting a running executable but does allow
 /// renaming it, so the old file moves aside and is removed on the next start.
+#[cfg(windows)]
 fn replace_executable(new: &Path) -> Result<()> {
     let exe = current_exe()?;
     let old = exe.with_extension("exe.old");

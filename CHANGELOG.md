@@ -2,6 +2,19 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.4.0 — 2026-11-09
+
+### Added
+- Linux support: PipeWire or PulseAudio, tray icon via StatusNotifierItem,
+  autostart through `~/.config/autostart`, updates from the settings.
+- Release archive `volume11-linux-x86_64.tar.gz` with install and uninstall
+  scripts.
+- A level saved under `<name>.exe` applies to `<name>` when it has no level of
+  its own, so a configuration copied from Windows keeps working.
+
+### Fixed
+- Files downloaded by an update are removed on the next start.
+
 ## 0.3.0 — 2026-10-27
 
 ### Added

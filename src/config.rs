@@ -118,8 +118,13 @@ impl Config {
         self.devices.get(device)
     }
 
+    /// Saved level of `key` on `device`.
+    ///
+    /// Falls back to `<key>.exe`, the name the same program had in a
+    /// configuration carried over from Windows (`spotify` → `spotify.exe`).
     pub fn get(&self, device: &str, key: &str) -> Option<&AppEntry> {
-        self.devices.get(device)?.apps.get(key)
+        let apps = &self.devices.get(device)?.apps;
+        apps.get(key).or_else(|| apps.get(&format!("{key}.exe")))
     }
 
     pub fn set(
@@ -245,11 +250,26 @@ pub fn config_path() -> PathBuf {
         return PathBuf::from(override_path);
     }
 
-    let base = std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
+    #[cfg(windows)]
+    {
+        let base = std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
 
-    base.join("Volume11").join("config.json")
+        base.join("Volume11").join("config.json")
+    }
+
+    // `$XDG_CONFIG_HOME/volume11`, normally `~/.config/volume11`.
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        base.join("volume11").join("config.json")
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +350,17 @@ mod tests {
 
         assert_eq!(parsed, config);
         assert_eq!(parsed.get(SPEAKERS, "firefox.exe").unwrap().volume, 42);
+    }
+
+    #[test]
+    fn windows_names_are_found_for_linux_keys() {
+        let mut config = Config::default();
+        config.set("dev", "Device", "spotify.exe", 80, false, "Spotify");
+        config.set("dev", "Device", "zen", 20, false, "Zen");
+        config.set("dev", "Device", "zen.exe", 90, false, "Zen");
+        assert_eq!(config.get("dev", "spotify").map(|e| e.volume), Some(80));
+        assert_eq!(config.get("dev", "zen").map(|e| e.volume), Some(20));
+        assert!(config.get("dev", "steam").is_none());
     }
 
     #[test]

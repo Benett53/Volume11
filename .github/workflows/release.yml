@@ -75,15 +75,51 @@ jobs:
             dist/Volume11.exe
             notes.md
 
+  # Built on the oldest supported Ubuntu so the binary runs on any glibc
+  # from 2.35 on, which covers every current desktop distribution.
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust and build dependencies
+        run: |
+          rustup toolchain install stable --profile minimal
+          sudo apt-get update -qq && sudo apt-get install -y -qq libpulse-dev pkg-config
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          mkdir -p dist/Volume11/icons
+          cp target/release/volume11 dist/Volume11/
+          cp packaging/linux/install.sh packaging/linux/uninstall.sh packaging/linux/volume11.desktop dist/Volume11/
+          cp assets/linux/volume11-*.png dist/Volume11/icons/
+          tar -C dist -czf dist/volume11-linux-x86_64.tar.gz Volume11
+          cp target/release/volume11 dist/volume11-linux-x86_64
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/volume11-linux-x86_64.tar.gz
+            dist/volume11-linux-x86_64
+
   # Checksums and their signature are what the in-app updater trusts, so they
   # are made in one place from exactly the files that get published.
   publish:
-    needs: release
+    needs: [release, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
 
       - name: Checksums and signature
         env:
@@ -91,7 +127,7 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
           mv dist/* .
-          sha256sum Volume11-Setup.exe Volume11.exe > SHA256SUMS
+          sha256sum Volume11-Setup.exe Volume11.exe volume11-linux-x86_64.tar.gz volume11-linux-x86_64 > SHA256SUMS
           cat SHA256SUMS
           echo "$MINISIGN_SECRET_KEY" > minisign.key
           minisign -S -s minisign.key -m SHA256SUMS -x SHA256SUMS.minisig -t "Volume11 ${{ github.ref_name }}"
@@ -103,6 +139,8 @@ jobs:
           files: |
             Volume11-Setup.exe
             Volume11.exe
+            volume11-linux-x86_64.tar.gz
+            volume11-linux-x86_64
             SHA256SUMS
             SHA256SUMS.minisig
           body_path: notes.md

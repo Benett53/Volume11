@@ -6,13 +6,17 @@
 //! Keying on the executable file name instead gives a stable identity that survives
 //! restarts, updates and locale changes.
 
+#[cfg(windows)]
 use std::path::Path;
 
+#[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, HANDLE, MAX_PATH};
+#[cfg(windows)]
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
+#[cfg(windows)]
 /// Full path of the executable backing `pid`, if it can be opened.
 ///
 /// Requires no elevation: `PROCESS_QUERY_LIMITED_INFORMATION` is enough for
@@ -43,6 +47,7 @@ pub fn executable_path(pid: u32) -> Option<String> {
     }
 }
 
+#[cfg(windows)]
 /// Lower-cased file name of the executable, e.g. `firefox.exe`.
 ///
 /// This is the key used in the configuration file, so it must stay stable.
@@ -97,6 +102,7 @@ pub fn usable_display_name(raw: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+#[cfg(windows)]
 /// The `FileDescription` recorded in an executable's version resource.
 ///
 /// This is what Task Manager and Explorer show, so it reads far better than a
@@ -177,6 +183,7 @@ pub fn file_description(executable_path: &str) -> Option<String> {
 }
 
 /// A UTF-16 resource string cut at its first NUL, with surrounding space removed.
+#[cfg(windows)]
 fn clean_description(chars: &[u16]) -> String {
     let end = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
     String::from_utf16_lossy(&chars[..end]).trim().to_string()
@@ -187,6 +194,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn description_stops_at_the_first_nul() {
         // What Spotify's version resource hands back: the name, a terminator,
         // then the start of the next entry.
@@ -221,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn current_process_resolves_to_an_executable() {
         let pid = std::process::id();
         let name = executable_name(pid).expect("own process must resolve");
@@ -228,7 +237,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod live {
     use super::*;
 

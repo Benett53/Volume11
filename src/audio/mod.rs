@@ -11,12 +11,16 @@
 //!    `IMMNotificationClient`). There is no polling timer, so switching the default
 //!    playback device or changing a level elsewhere is reflected immediately.
 
+#[cfg(windows)]
 mod callbacks;
+#[cfg_attr(target_os = "linux", path = "pulse.rs")]
 mod engine;
+#[cfg(windows)]
 mod policy;
 pub mod process;
 
 pub use engine::{AudioHandle, spawn};
+#[cfg(windows)]
 pub use policy::set_default_device;
 
 /// Identity of the master (endpoint) volume in configuration and commands.

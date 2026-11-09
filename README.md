@@ -2,10 +2,10 @@
 
 # Volume11
 
-Per-application volume for Windows 11, from the notification area.
+Per-application volume for Windows 11 and Linux, from the notification area.
 
-Windows forgets. Volume11 stores a level per program and sets it again when that
-program starts playing.
+Volume11 stores a level per program and sets it again when that program starts
+playing. New programs can start at a fixed default level instead.
 
 <br clear="left">
 
@@ -22,12 +22,14 @@ program starts playing.
 - Event driven, no polling
 - Application icons read from the executables
 - True-black theme, seven accents
-- Autostart, switchable from Task Manager
+- Autostart, switchable from Task Manager or the desktop's autostart settings
 - Closing the window keeps it running in the tray
 - One instance at a time
 - Updates from the settings, with a small dot on the settings button when one is out
 
 ## Install
+
+### Windows
 
 Download `Volume11-Setup.exe` from the
 [latest release](https://github.com/Benett53/Volume11/releases/latest) and run it.
@@ -41,6 +43,24 @@ before deleting saved volumes.
 `Volume11.exe` is attached to the release as well, for a portable copy.
 
 The build is not code-signed, so SmartScreen warns once.
+
+### Linux
+
+Requires PipeWire (with `pipewire-pulse`) or PulseAudio, and a desktop with a
+StatusNotifierItem tray (KDE Plasma; GNOME with the AppIndicator extension).
+
+```bash
+tar xzf volume11-linux-x86_64.tar.gz
+./Volume11/install.sh
+```
+
+Installs to `~/.local/bin` with a menu entry and icons; `sudo ./install.sh
+--system` installs to `/usr/local` instead. Running a newer `install.sh` updates
+in place. `~/.local/share/volume11/uninstall.sh` removes everything except the
+saved volumes, `--purge` removes those too.
+
+The window runs through XWayland in a Wayland session: Wayland lets no client
+hide its window and reopen it at a chosen spot, which a tray mixer needs.
 
 ## Using it
 
@@ -58,18 +78,22 @@ The build is not code-signed, so SmartScreen warns once.
 | Hide | `Esc`, ✕, or Alt+F4 |
 | Quit | Tray menu → Quit |
 
-Closing only hides. The window opens at the bottom right of the primary
-monitor, above the taskbar, whatever its resolution or scaling. Dragging moves
-it for now; the next open puts it back.
+Closing only hides. On Windows the window opens at the bottom right of the
+primary monitor, above the taskbar, whatever its resolution or scaling. On
+Linux it opens next to the tray icon, or at the bottom right when opened
+another way. Dragging moves it for now; the next open puts it back.
 
 Flags:
 
 - `--show` opens the mixer immediately
+- `--quit` asks a running copy to save and exit (Linux)
 - `VOLUME11_CONFIG=<path>` for a portable configuration file
+- `WGPU_BACKEND=gl` uses OpenGL instead of Vulkan (Linux)
 
 ## Configuration
 
-`%APPDATA%\Volume11\config.json`:
+`%APPDATA%\Volume11\config.json` on Windows, `~/.config/volume11/config.json`
+on Linux:
 
 ```json
 {
@@ -101,10 +125,17 @@ first start: its levels move to the device in use.
 
 `unknown_app_policy`: `leave_alone` or `apply_default`.
 
-Autostart lives in the registry, not here, so Task Manager and Volume11 agree on
+On Linux, devices are keyed by sink name and programs by executable name
+(`spotify`, `librewolf`). Programs that run inside a host such as Electron,
+Java or Wine are keyed by the application name they report (`vesktop`,
+`game.exe`). A level saved as `<name>.exe`, for example in a configuration
+copied from Windows, is used for `<name>` as long as there is none of its own.
+
+On Windows, autostart lives in the registry, not here, so Task Manager and Volume11 agree on
 it. Switching it off marks the entry disabled instead of deleting it, which is
 why it stays listed under Startup. If the entry points at a copy that has been
-deleted, the next start repoints it.
+deleted, the next start repoints it. On Linux it is
+`~/.config/autostart/volume11.desktop`.
 
 Written atomically. An unreadable file is moved to `config.json.broken`.
 
@@ -118,7 +149,8 @@ sent or received.
 An update is installed only if `SHA256SUMS` carries a valid minisign signature
 from the key built into Volume11 and the downloaded file matches its checksum.
 The installed copy runs the new setup silently and starts again; a portable
-`Volume11.exe` replaces itself.
+`Volume11.exe` replaces itself. On Linux the executable is replaced in place,
+through `pkexec` for a system-wide install.
 
 ## Building
 
@@ -135,7 +167,9 @@ The installer needs [Inno Setup](https://jrsoftware.org/isinfo.php):
 ISCC.exe /DAppVersion=0.2.1 installer/volume11.iss
 ```
 
-Releases are built with MSVC; the GNU toolchain works too.
+Releases are built with MSVC; the GNU toolchain works too. On Linux the build
+needs the PulseAudio headers (`libpulse-dev` on Debian/Ubuntu, `libpulse` on
+Arch).
 
 ## How it works
 
@@ -151,6 +185,8 @@ Releases are built with MSVC; the GNU toolchain works too.
 | `src/autostart.rs` | `Run` key plus Task Manager status byte |
 | `src/ui/` | Window, theme, slider, icons |
 | `src/ui/placement.rs` | Primary monitor work area and taskbar geometry |
+| `src/audio/pulse.rs` | Linux engine on the PulseAudio protocol (PipeWire) |
+| `src/*_linux.rs`, `src/ui/*_linux.rs` | Linux tray (StatusNotifierItem), Unix socket instance, XDG autostart, X11 placement, icon theme lookup |
 
 The UI thread never touches COM. It sends commands and receives events over
 channels. egui runs reactively, so an idle Volume11 draws nothing.
@@ -160,7 +196,12 @@ Sound settings, EarTrumpet and SoundSwitch all use `IPolicyConfig`, an
 undocumented COM interface unchanged since Windows 7; Volume11 does the same
 and sets the device for all three roles, as the quick settings flyout does.
 
-Rendering goes through `wgpu` on Direct3D 12. Windows ships no OpenGL past 1.1;
+On Linux, sinks are devices and sink inputs are sessions. Notification
+sounds (role `event`) count as system sounds. Change events carry no origin,
+so an event for a stream Volume11 wrote less than 400 ms earlier is taken as
+its own echo.
+
+Rendering goes through `wgpu` on Direct3D 12 (Vulkan on Linux). Windows ships no OpenGL past 1.1;
 everything above comes from the GPU driver, so a machine on the Basic Display
 Adapter has none. D3D12 is a Windows API with a software fallback and better
 maintained drivers.

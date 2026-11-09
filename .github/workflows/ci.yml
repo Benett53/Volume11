@@ -10,12 +10,20 @@ env:
 
 jobs:
   check:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libpulse-dev pkg-config
 
       - name: Cache cargo
         uses: actions/cache@v4

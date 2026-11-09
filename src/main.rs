@@ -1,4 +1,4 @@
-//! Volume11 — per-application volume manager for Windows.
+//! Volume11 — per-application volume manager for Windows and Linux.
 //!
 //! Lives in the notification area. The window is created hidden and shown on
 //! demand, so starting with Windows costs a window that is never drawn.
@@ -35,7 +35,14 @@ fn renderer_options() -> egui_wgpu::WgpuConfiguration {
     };
 
     if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
-        setup.instance_descriptor.backends = wgpu::Backends::DX12;
+        // On Linux, Vulkan is the native path for every current driver; GL is
+        // kept as the fallback for machines without a Vulkan driver.
+        setup.instance_descriptor.backends = if cfg!(windows) {
+            wgpu::Backends::DX12
+        } else {
+            // `WGPU_BACKEND=gl` forces OpenGL, e.g. for a broken Vulkan driver.
+            wgpu::Backends::from_env().unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::GL)
+        };
         // An integrated GPU is plenty for a few hundred triangles and avoids
         // waking a discrete card, which on laptops costs battery for nothing.
         setup.power_preference = wgpu::PowerPreference::LowPower;
@@ -44,7 +51,51 @@ fn renderer_options() -> egui_wgpu::WgpuConfiguration {
     configuration
 }
 
+/// Event loop setup for Linux.
+///
+/// The window runs through XWayland even in a Wayland session. A tray
+/// application needs to hide its window and to open it next to the tray, and
+/// Wayland lets a client do neither: winit can not hide a Wayland window and
+/// the compositor alone decides where it goes. Under X11 both work, and
+/// XWayland is part of every Wayland desktop.
+#[cfg(target_os = "linux")]
+fn event_loop_builder() -> Option<eframe::EventLoopBuilderHook> {
+    use winit::platform::x11::EventLoopBuilderExtX11;
+
+    Some(Box::new(|builder| {
+        builder.with_x11();
+    }))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn event_loop_builder() -> Option<eframe::EventLoopBuilderHook> {
+    None
+}
+
 fn main() -> eframe::Result<()> {
+    // Overlays such as MangoHud hook every Vulkan application when enabled
+    // globally. Over a volume mixer the overlay is noise, and it redraws all
+    // the time, which costs CPU in a window that otherwise only draws on input.
+    #[cfg(target_os = "linux")]
+    // SAFETY: nothing else runs yet, so no other thread reads the environment.
+    unsafe {
+        std::env::set_var("DISABLE_MANGOHUD", "1");
+        std::env::set_var("DISABLE_VKBASALT", "1");
+    }
+
+    // `--quit` asks a running copy to save and exit; used by the uninstaller.
+    #[cfg(target_os = "linux")]
+    if std::env::args().any(|argument| argument == "--quit") {
+        instance::signal_quit();
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    if std::env::args().any(|argument| argument == "--version") {
+        println!("volume11 {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // `--show` opens the mixer straight away instead of starting minimised.
     // Useful for a desktop shortcut, and it is how the window gets tested.
     let show_on_start = std::env::args().any(|argument| argument == "--show");
@@ -105,11 +156,12 @@ fn main() -> eframe::Result<()> {
         viewport,
         // Reactive mode: no frames are produced while nothing happens.
         run_and_return: false,
+        event_loop_builder: event_loop_builder(),
         wgpu_options: renderer_options(),
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Volume11",
         options,
         Box::new(move |cc| {
@@ -134,5 +186,10 @@ fn main() -> eframe::Result<()> {
 
             Ok(Box::new(app))
         }),
-    )
+    );
+
+    if let Err(error) = &result {
+        eprintln!("volume11: {error}");
+    }
+    result
 }

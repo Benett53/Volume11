@@ -1,6 +1,6 @@
 [package]
 name = "volume11"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
@@ -14,8 +14,19 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.1"
 ureq = "3"
+
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_Security", "Win32_System_Variant", "Win32_Devices_FunctionDiscovery", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_ProcessStatus", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
 windows-core = "0.62.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+libpulse-binding = "2.30"
+png = "0.17"
+resvg = { version = "0.45", default-features = false }
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+x11rb = { version = "0.13", features = ["randr"] }
 
 [build-dependencies]
 winresource = "0.1.31"

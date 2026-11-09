@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Volume11
+GenericName=Volume Mixer
+Comment=Per-application volume control that remembers levels
+Exec=volume11 --show
+Icon=volume11
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=volume;mixer;audio;sound;
+StartupNotify=false
