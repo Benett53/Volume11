@@ -2,6 +2,15 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Security
+- Linux: the updater downloaded into a folder with a fixed name in the shared
+  temporary directory. Another local user could prepare that folder and swap
+  the file between the checksum check and the installation. The folder is now
+  created anew for each update, with an unpredictable name and for this user
+  only.
+
 ## 0.4.0 — 2026-11-09
 
 ### Added
