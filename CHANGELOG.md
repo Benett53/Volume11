@@ -2,6 +2,17 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+- Linux: a program updated by the package manager while running (reported as
+  `zen-bin (deleted)`, `electron (deleted)`) kept its saved level instead of
+  being treated as a new program.
+- Linux: a level a program or WirePlumber sets right after the program starts
+  no longer replaces the saved one; the saved level is held for 5 seconds.
+- Linux: changes made outside Volume11 shortly after Volume11 changed the same
+  stream were ignored, so the mixer could show a level the stream did not have.
+
 ## 0.4.0 — 2026-11-09
 
 ### Added

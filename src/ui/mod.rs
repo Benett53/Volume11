@@ -11,6 +11,7 @@ mod placement;
 mod theme;
 mod widgets;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,12 @@ pub const WINDOW_HEIGHT: f32 = 572.0;
 
 /// How long a status line stays on screen.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long after a program starts its saved level is held against other
+/// changes. Some programs set their own stream volume once they are up
+/// (Spotify restores its in-app slider), and WirePlumber restores the level it
+/// remembers for the stream; either would otherwise win over the saved one.
+const HOLD_AFTER_START: Duration = Duration::from_secs(5);
 
 /// Edge length of the application icon in a row.
 const ICON_SIZE: f32 = 21.0;
@@ -102,6 +109,10 @@ pub struct VolumeApp {
     editing: Option<(String, String)>,
 
     updater: Updater,
+
+    /// Levels just applied to a starting program, held for
+    /// [`HOLD_AFTER_START`]: key → (applied at, volume, mute if it was set).
+    holds: HashMap<String, (Instant, u8, Option<bool>)>,
 }
 
 impl VolumeApp {
@@ -140,6 +151,7 @@ impl VolumeApp {
             icons: IconCache::default(),
             editing: None,
             updater,
+            holds: HashMap::new(),
         }
     }
 
@@ -258,6 +270,9 @@ impl VolumeApp {
                     self.sessions = list;
                 }
                 Event::Changed { key, volume, muted } => {
+                    if self.hold(&key, volume, muted) {
+                        continue;
+                    }
                     if let Some(session) = self.sessions.iter_mut().find(|s| s.key == key) {
                         session.volume = volume;
                         session.muted = muted;
@@ -303,24 +318,52 @@ impl VolumeApp {
             return;
         }
 
-        if let Some(entry) = self.config.get(&self.device_id, key) {
-            self.audio.send(Command::SetVolume {
-                key: key.to_string(),
-                volume: entry.volume,
-            });
+        let (volume, muted) = if let Some(entry) = self.config.get(&self.device_id, key) {
+            (entry.volume, Some(entry.muted))
+        } else if self.config.settings.unknown_app_policy == UnknownAppPolicy::ApplyDefault {
+            (self.config.settings.default_volume, None)
+        } else {
+            return;
+        };
+
+        self.send_level(key, volume, muted);
+        self.holds
+            .insert(key.to_string(), (Instant::now(), volume, muted));
+        self.set_status(format!("{label}: {volume} %"));
+    }
+
+    fn send_level(&self, key: &str, volume: u8, muted: Option<bool>) {
+        self.audio.send(Command::SetVolume {
+            key: key.to_string(),
+            volume,
+        });
+        if let Some(muted) = muted {
             self.audio.send(Command::SetMute {
                 key: key.to_string(),
-                muted: entry.muted,
+                muted,
             });
-            self.set_status(format!("{label}: {} %", entry.volume));
-        } else if self.config.settings.unknown_app_policy == UnknownAppPolicy::ApplyDefault {
-            let volume = self.config.settings.default_volume;
-            self.audio.send(Command::SetVolume {
-                key: key.to_string(),
-                volume,
-            });
-            self.set_status(format!("{label}: {volume} %"));
         }
+    }
+
+    /// Put the level applied at start back if something else changed it
+    /// within [`HOLD_AFTER_START`]. Returns whether the change was undone.
+    fn hold(&mut self, key: &str, volume: u8, muted: bool) -> bool {
+        self.holds
+            .retain(|_, (at, _, _)| at.elapsed() < HOLD_AFTER_START);
+        let Some(&(_, held_volume, held_muted)) = self.holds.get(key) else {
+            return false;
+        };
+        if volume == held_volume && held_muted.is_none_or(|held| held == muted) {
+            return false;
+        }
+        self.send_level(key, held_volume, held_muted);
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.key == key) {
+            session.volume = held_volume;
+            if let Some(held) = held_muted {
+                session.muted = held;
+            }
+        }
+        true
     }
 
     /// Store the current levels of everything on screen, for the current device.
@@ -672,6 +715,8 @@ impl VolumeApp {
             });
 
         for (key, volume, muted, mute_changed) in changes {
+            // A level set by hand is never undone.
+            self.holds.remove(&key);
             if mute_changed {
                 self.audio.send(Command::SetMute {
                     key: key.clone(),
