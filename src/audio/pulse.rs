@@ -30,12 +30,46 @@ use pulse::volume::{ChannelVolumes, Volume};
 use super::process::{friendly_label, usable_display_name};
 use super::{Command, DeviceInfo, Event, MASTER_KEY, SYSTEM_KEY, SessionKind, SessionSnapshot};
 
-/// How long a change notification for something this app just wrote is taken
-/// to be the echo of that write. Pulse change events carry no origin, unlike
-/// the event context GUID WASAPI passes along, so time is the only marker.
-/// Without this a slider being dragged would jump back to older values as the
-/// notifications for them arrive.
+/// How long a change notification for something this app just wrote may be
+/// the echo of that write. Pulse change events carry no origin, unlike the
+/// event context GUID WASAPI passes along, so time and value are the only
+/// markers. Without this a slider being dragged would jump back to older
+/// values as the notifications for them arrive.
 const ECHO_WINDOW: Duration = Duration::from_millis(400);
+
+/// What this app wrote to one stream or sink during the last [`ECHO_WINDOW`].
+///
+/// A change notification only counts as an echo when it carries values this
+/// app wrote. Time alone is not enough: a program that sets its own volume
+/// right after it starts (Spotify does) or WirePlumber restoring a level
+/// would otherwise be hidden, and the mixer would show a level the stream
+/// does not have.
+#[derive(Debug, Default)]
+struct Writes(Vec<(Instant, Option<u8>, Option<bool>)>);
+
+impl Writes {
+    fn record(&mut self, volume: Option<u8>, muted: Option<bool>) {
+        self.0.retain(|(at, _, _)| at.elapsed() < ECHO_WINDOW);
+        self.0.push((Instant::now(), volume, muted));
+    }
+
+    /// Whether `volume`/`muted` is the echo of a recent write. `known` is the
+    /// level this app holds for the stream, which already includes its own
+    /// latest writes; a field that was not written must still match it.
+    fn is_echo(&self, volume: u8, muted: bool, known: (u8, bool)) -> bool {
+        let recent: Vec<_> = self
+            .0
+            .iter()
+            .filter(|(at, _, _)| at.elapsed() < ECHO_WINDOW)
+            .collect();
+        if recent.is_empty() {
+            return false;
+        }
+        let volume_ok = volume == known.0 || recent.iter().any(|(_, v, _)| *v == Some(volume));
+        let muted_ok = muted == known.1 || recent.iter().any(|(_, _, m)| *m == Some(muted));
+        volume_ok && muted_ok
+    }
+}
 
 /// Upper bound for one query answer. The server answers in microseconds; this
 /// only matters if it hangs.
@@ -200,9 +234,13 @@ pub(crate) fn stream_key(
     application: Option<&str>,
     node: Option<&str>,
 ) -> Option<String> {
+    // libpulse reads the binary name from `/proc/self/exe`, which ends in
+    // " (deleted)" once a package update has replaced the file while the
+    // program keeps running. The program is still the same one.
     let binary = binary
+        .map(|binary| binary.strip_suffix(" (deleted)").unwrap_or(binary))
         .map(str::to_lowercase)
-        .filter(|binary| !HOST_BINARIES.contains(&binary.as_str()));
+        .filter(|binary| !binary.is_empty() && !HOST_BINARIES.contains(&binary.as_str()));
     let key = binary
         .or_else(|| application.map(str::to_lowercase))
         .or_else(|| node.map(str::to_lowercase))?;
@@ -301,9 +339,9 @@ struct Engine {
     sink: Option<Sink>,
     streams: HashMap<u32, Stream>,
 
-    /// When this app last wrote each stream (by index) and the master volume.
-    written: HashMap<u32, Instant>,
-    master_written: Option<Instant>,
+    /// What this app recently wrote to each stream (by index) and the master.
+    written: HashMap<u32, Writes>,
+    master_written: Writes,
 }
 
 impl Drop for Engine {
@@ -379,7 +417,7 @@ impl Engine {
             sink: None,
             streams: HashMap::new(),
             written: HashMap::new(),
-            master_written: None,
+            master_written: Writes::default(),
         };
 
         engine.sink = engine.default_sink();
@@ -561,8 +599,6 @@ impl Engine {
 
     /// Set the level of the master volume or of every stream of a program.
     fn write(&mut self, key: &str, volume: Option<u8>, muted: Option<bool>) {
-        let now = Instant::now();
-
         if key == MASTER_KEY {
             let Some(sink) = self.sink.as_mut() else {
                 return;
@@ -574,7 +610,7 @@ impl Engine {
                 sink.muted = muted;
             }
             let (name, channels) = (sink.name.clone(), sink.channels);
-            self.master_written = Some(now);
+            self.master_written.record(volume, muted);
 
             self.mainloop.lock();
             let mut introspect = self.context.introspect();
@@ -622,14 +658,8 @@ impl Engine {
         self.mainloop.unlock();
 
         for (index, _) in targets {
-            self.written.insert(index, now);
+            self.written.entry(index).or_default().record(volume, muted);
         }
-    }
-
-    fn is_echo(&self, index: u32) -> bool {
-        self.written
-            .get(&index)
-            .is_some_and(|at| at.elapsed() < ECHO_WINDOW)
     }
 
     fn handle_notice<F: Fn()>(&mut self, notice: Notice, wake: &F) {
@@ -665,7 +695,15 @@ impl Engine {
                 let Some(stream) = self.stream(notice.index) else {
                     return;
                 };
-                let echo = self.is_echo(stream.index);
+                let echo = match (
+                    self.written.get(&stream.index),
+                    self.streams.get(&stream.index),
+                ) {
+                    (Some(writes), Some(known)) => {
+                        writes.is_echo(stream.volume, stream.muted, (known.volume, known.muted))
+                    }
+                    _ => false,
+                };
                 let previous = self.streams.insert(stream.index, stream.clone());
                 if echo {
                     // Keep the value this app wrote, not the late echo of an
@@ -702,15 +740,19 @@ impl Engine {
                 if self.sink.as_ref().map(|sink| sink.index) != Some(notice.index) {
                     return;
                 }
-                let echo = self
-                    .master_written
-                    .is_some_and(|at| at.elapsed() < ECHO_WINDOW);
-                if echo {
-                    return;
-                }
                 let Some(current) = self.default_sink() else {
                     return;
                 };
+                let echo = self.sink.as_ref().is_some_and(|sink| {
+                    self.master_written.is_echo(
+                        current.volume,
+                        current.muted,
+                        (sink.volume, sink.muted),
+                    )
+                });
+                if echo {
+                    return;
+                }
                 let changed = self.sink.as_ref().is_some_and(|sink| {
                     sink.name == current.name
                         && (sink.volume != current.volume || sink.muted != current.muted)
@@ -861,10 +903,44 @@ mod tests {
     }
 
     #[test]
+    fn replaced_executables_keep_their_key() {
+        assert_eq!(
+            stream_key(Some("zen-bin (deleted)"), Some("Zen"), None).as_deref(),
+            Some("zen")
+        );
+        assert_eq!(
+            stream_key(Some("electron (deleted)"), Some("vesktop"), None).as_deref(),
+            Some("vesktop")
+        );
+    }
+
+    #[test]
     fn labels_are_readable() {
         assert_eq!(stream_label(Some("vesktop"), "vesktop"), "Vesktop");
         assert_eq!(stream_label(Some("Spotify"), "spotify"), "Spotify");
         assert_eq!(stream_label(None, "game.exe"), "Game");
+    }
+
+    #[test]
+    fn echoes_of_own_writes_are_recognised() {
+        let mut writes = Writes::default();
+        writes.record(Some(50), None);
+        writes.record(Some(51), None);
+        writes.record(Some(52), None);
+        // A late notification for an earlier step of a drag.
+        assert!(writes.is_echo(50, false, (52, false)));
+        assert!(writes.is_echo(52, false, (52, false)));
+    }
+
+    #[test]
+    fn foreign_changes_are_not_taken_for_echoes() {
+        let mut writes = Writes::default();
+        writes.record(Some(60), Some(false));
+        // The program or WirePlumber set its own level right after ours.
+        assert!(!writes.is_echo(30, false, (60, false)));
+        assert!(!writes.is_echo(60, true, (60, false)));
+        // Nothing written recently: never an echo.
+        assert!(!Writes::default().is_echo(60, false, (60, false)));
     }
 
     #[test]
